@@ -7,16 +7,15 @@ We use character-level tokenization for simplicity.
 Key Concepts:
 1. Tokenization - Converting characters to numbers
 2. Train/Validation Split - Separating data for training and evaluation
-3. DataLoader - Efficient batching for training
+3. Batch Generation - Creating input-target pairs for training
 """
 
 import os
 import urllib.request
 import torch
-from torch.utils.data import Dataset, DataLoader
 
-# URL for the Tiny Shakespeare dataset (hosted by Andrej Karpathy)
-SHAKESPEARE_URL = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+# URL for the Tiny Shakespeare dataset (forked from Andrej Karpathy)
+SHAKESPEARE_URL = "https://raw.githubusercontent.com/atilsamancioglu/ShakespeareInput/refs/heads/main/input.txt"
 DATA_PATH = "data/shakespeare.txt"
 
 
@@ -26,7 +25,7 @@ def download_shakespeare():
         print(f"Dataset already exists at {DATA_PATH}")
         return
 
-    print("Downloading Tiny Shakespeare dataset...")
+    print("Downloading Shakespeare dataset...")
     os.makedirs("data", exist_ok=True)
     urllib.request.urlretrieve(SHAKESPEARE_URL, DATA_PATH)
     print(f"Downloaded to {DATA_PATH}")
@@ -42,6 +41,27 @@ class CharacterTokenizer:
     Example:
         'hello' -> [7, 4, 11, 11, 14]
         [7, 4, 11, 11, 14] -> 'hello'
+
+    -------------------------------------------------------------------------
+    WHY CHARACTER-LEVEL TOKENIZATION?
+    -------------------------------------------------------------------------
+    We use character-level tokenization for educational simplicity.
+    Industry models (GPT, BERT) use subword tokenization (BPE, WordPiece)
+    which is more efficient but adds complexity.
+
+    IMPORTANT: The integer IDs we assign are ARBITRARY - they're just indices!
+    The neural network doesn't "see" these numbers directly. Instead:
+
+        Character → Integer ID → Embedding Layer → Learned Vector
+           'h'    →     7      →   lookup[7]    → [0.23, -0.45, ...]
+
+    The embedding layer (nn.Embedding) is a LEARNABLE lookup table.
+    During training, backpropagation updates these vectors so that
+    characters appearing in similar contexts get similar representations.
+
+    This is the same principle as Word2Vec: the actual "meaning" is not in
+    the arbitrary ID, but in the learned embedding vector.
+    -------------------------------------------------------------------------
     """
 
     def __init__(self, text: str):
@@ -83,58 +103,77 @@ class CharacterTokenizer:
         return ''.join(characters)
 
 
-class ShakespeareDataset(Dataset):
+def get_batch(data: torch.Tensor, block_size: int, batch_size: int):
     """
-    PyTorch Dataset for Shakespeare text.
+    Generate a random batch of training data.
 
-    For language modeling, we create input-target pairs:
-    - Input:  [char_0, char_1, char_2, ..., char_n-1]
-    - Target: [char_1, char_2, char_3, ..., char_n]
+    -------------------------------------------------------------------------
+    HOW LANGUAGE MODEL TRAINING WORKS
+    -------------------------------------------------------------------------
+    We create input-target pairs where TARGET = INPUT shifted by 1 position.
+    The model learns to predict the NEXT character at each position.
 
-    The model learns to predict the next character at each position.
-    """
+    Example with block_size=5:
 
-    def __init__(self,
-                 data: torch.Tensor,
-                 block_size: int):
-        """
-        Args:
-            data: Tensor of token IDs
-            block_size: Length of each training sequence
-        """
-        self.data = data
-        self.block_size = block_size
+        Text: "To be or not to be"
 
-    def __len__(self) -> int:
-        # Number of possible starting positions
-        return len(self.data) - self.block_size
+        1. Pick random starting position, grab (block_size + 1) characters:
+           chunk = ['T', 'o', ' ', 'b', 'e', ' ']   (6 chars)
 
-    def __getitem__(self, index: int) -> tuple:
-        # 1. Get a chunk of data (block_size + 1 for input and target)
-        chunk = self.data[index: index + self.block_size + 1]
+        2. Split into input (x) and target (y):
+           x = ['T', 'o', ' ', 'b', 'e']     (first 5 chars)
+           y = ['o', ' ', 'b', 'e', ' ']     (last 5 chars = shifted by 1)
 
-        # 2. Input is all characters except the last
-        x = chunk[:-1]
+        3. The model learns to predict:
+           Given 'T'       → predict 'o'
+           Given 'To'      → predict ' '
+           Given 'To '     → predict 'b'
+           Given 'To b'    → predict 'e'
+           Given 'To be'   → predict ' '
 
-        # 3. Target is all characters except the first (shifted by 1)
-        y = chunk[1:]
-
-        return x, y
-
-
-def create_dataloaders(batch_size: int = 64,
-                       block_size: int = 256,
-                       train_split: float = 0.9) -> tuple:
-    """
-    Create training and validation DataLoaders.
+    This is done for multiple random positions (batch_size) at once.
+    -------------------------------------------------------------------------
 
     Args:
+        data: Tensor of all token IDs
+        block_size: Length of each sequence
         batch_size: Number of sequences per batch
+
+    Returns:
+        x: Input sequences, shape (batch_size, block_size)
+        y: Target sequences, shape (batch_size, block_size)
+    """
+    # 1. Pick random starting positions
+    max_start = len(data) - block_size - 1
+    positions = torch.randint(max_start, (batch_size,))
+
+    # 2. Extract input (x) and target (y) for each position
+    x_list = []
+    y_list = []
+
+    for pos in positions:
+        x_list.append(data[pos : pos + block_size])        # Input: chars 0 to n-1
+        y_list.append(data[pos + 1 : pos + block_size + 1])  # Target: chars 1 to n (shifted by 1)
+
+    # 3. Stack into batch tensors: (batch_size, block_size)
+    x = torch.stack(x_list)
+    y = torch.stack(y_list)
+
+    return x, y
+
+
+def load_data(block_size: int = 256, train_split: float = 0.9):
+    """
+    Load and prepare the Shakespeare dataset.
+
+    Args:
         block_size: Length of each sequence
         train_split: Fraction of data for training (rest is validation)
 
     Returns:
-        train_dataloader, val_dataloader, tokenizer
+        train_data: Training token IDs as tensor
+        val_data: Validation token IDs as tensor
+        tokenizer: The character tokenizer
     """
     # 1. Download the dataset
     download_shakespeare()
@@ -162,44 +201,23 @@ def create_dataloaders(batch_size: int = 64,
     print(f"\nTrain size: {len(train_data):,} tokens")
     print(f"Val size: {len(val_data):,} tokens")
 
-    # 6. Create Dataset objects
-    train_dataset = ShakespeareDataset(data=train_data, block_size=block_size)
-    val_dataset = ShakespeareDataset(data=val_data, block_size=block_size)
-
-    # 7. Create DataLoader objects
-    train_dataloader = DataLoader(
-        dataset=train_dataset,
-        batch_size=batch_size,
-        shuffle=True
-    )
-
-    val_dataloader = DataLoader(
-        dataset=val_dataset,
-        batch_size=batch_size,
-        shuffle=False
-    )
-
-    print(f"\nTrain batches: {len(train_dataloader)}")
-    print(f"Val batches: {len(val_dataloader)}")
-
-    return train_dataloader, val_dataloader, tokenizer
+    return train_data, val_data, tokenizer
 
 
 # Test the dataset
 if __name__ == "__main__":
-    # 1. Create dataloaders
-    train_dataloader, val_dataloader, tokenizer = create_dataloaders(
-        batch_size=4,
-        block_size=128
-    )
+    # 1. Load data
+    train_data, val_data, tokenizer = load_data(block_size=128)
 
     # 2. Get a sample batch
-    x, y = next(iter(train_dataloader))
+    x, y = get_batch(train_data, block_size=128, batch_size=4)
 
     print(f"\nSample batch:")
     print(f"  Input shape: {x.shape}")
     print(f"  Target shape: {y.shape}")
 
-    # 3. Decode and show a sample
-    print(f"\nSample sequence:")
-    print(tokenizer.decode(x[0]))
+    # 3. Show the input-target relationship
+    print(f"\n--- Demonstrating input-target pairs ---")
+    print(f"Input (x[0]):  {tokenizer.decode(x[0][:20])}...")
+    print(f"Target (y[0]): {tokenizer.decode(y[0][:20])}...")
+    print(f"Notice: target is input shifted by 1 character!")

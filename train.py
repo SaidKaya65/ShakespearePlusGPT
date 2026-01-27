@@ -16,7 +16,7 @@ import time
 import math
 import torch
 from model import GPT
-from dataset import create_dataloaders
+from dataset import load_data, get_batch
 
 # ==============================================================================
 # Configuration
@@ -80,7 +80,7 @@ def get_learning_rate(iteration: int,
 # ==============================================================================
 
 @torch.no_grad()
-def evaluate(model, train_dataloader, val_dataloader, eval_iters, device):
+def evaluate(model, train_data, val_data, block_size, batch_size, eval_iters, device):
     """Evaluate the model on training and validation sets."""
     # 1. Set model to evaluation mode
     model.eval()
@@ -88,26 +88,23 @@ def evaluate(model, train_dataloader, val_dataloader, eval_iters, device):
     losses = {}
 
     # 2. Evaluate on both splits
-    for split_name, dataloader in [("train", train_dataloader), ("val", val_dataloader)]:
+    for split_name, data in [("train", train_data), ("val", val_data)]:
         total_loss = 0.0
-        num_batches = 0
 
-        # 3. Iterate through batches
-        for batch_idx, (x, y) in enumerate(dataloader):
-            if batch_idx >= eval_iters:
-                break
-
-            # 4. Move data to device and forward pass
+        # 3. Run eval_iters batches
+        for _ in range(eval_iters):
+            # 4. Get a random batch
+            x, y = get_batch(data, block_size, batch_size)
             x, y = x.to(device), y.to(device)
+
+            # 5. Forward pass
             _, loss = model(x, y)
-
             total_loss += loss.item()
-            num_batches += 1
 
-        # 5. Calculate average loss
-        losses[split_name] = total_loss / num_batches
+        # 6. Calculate average loss
+        losses[split_name] = total_loss / eval_iters
 
-    # 6. Set model back to training mode
+    # 7. Set model back to training mode
     model.train()
 
     return losses
@@ -156,8 +153,7 @@ def train():
     print("Loading Data")
     print("-" * 60)
 
-    train_dataloader, val_dataloader, tokenizer = create_dataloaders(
-        batch_size=config["batch_size"],
+    train_data, val_data, tokenizer = load_data(
         block_size=config["block_size"]
     )
 
@@ -206,7 +202,6 @@ def train():
     print(f"Eval interval: {config['eval_interval']}")
     print("Starting training...\n")
 
-    train_iterator = iter(train_dataloader)
     best_val_loss = float('inf')
     start_time = time.time()
 
@@ -222,13 +217,8 @@ def train():
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
 
-        # 5.2 Get Next Batch
-        try:
-            x, y = next(train_iterator)
-        except StopIteration:
-            train_iterator = iter(train_dataloader)
-            x, y = next(train_iterator)
-
+        # 5.2 Get a Random Batch
+        x, y = get_batch(train_data, config["block_size"], config["batch_size"])
         x, y = x.to(config["device"]), y.to(config["device"])
 
         # 5.3 Forward Pass
@@ -249,8 +239,10 @@ def train():
 
             losses = evaluate(
                 model=model,
-                train_dataloader=train_dataloader,
-                val_dataloader=val_dataloader,
+                train_data=train_data,
+                val_data=val_data,
+                block_size=config["block_size"],
+                batch_size=config["batch_size"],
                 eval_iters=config["eval_iters"],
                 device=config["device"]
             )
