@@ -151,12 +151,51 @@ class GPT(nn.Module):
         # Maps from embedding_dim to vocab_size (one score per character)
         self.output_proj = nn.Linear(embedding_dim, vocab_size)
 
-        # 9. Create causal mask (lower triangular) to prevent attending to future
-        # True values are masked out (not allowed to attend)
+        # 9. Create Causal Mask (to prevent attending to future tokens)
+        #
+        # -----------------------------------------------------------------------
+        # WHY DO WE NEED A CAUSAL MASK?
+        # -----------------------------------------------------------------------
+        # During training, we feed the ENTIRE sequence at once for efficiency.
+        # But the model should only predict based on PREVIOUS tokens, not future ones.
+        #
+        # Without mask (CHEATING):
+        #   To predict what comes after "To", the model could peek at "be" → unfair!
+        #
+        # With mask (CORRECT):
+        #   Each position can only "see" itself and previous positions.
+        #
+        # Example for sequence "To be" (4 tokens):
+        #
+        #              Attending TO position:
+        #              0    1    2    3
+        #            ['T', 'o', ' ', 'b']
+        #
+        # Pos 0 'T':  [ ok  MASK MASK MASK ]  ← 'T' can only see itself
+        # Pos 1 'o':  [ ok   ok  MASK MASK ]  ← 'o' can see 'T', 'o'
+        # Pos 2 ' ':  [ ok   ok   ok  MASK ]  ← ' ' can see 'T', 'o', ' '
+        # Pos 3 'b':  [ ok   ok   ok   ok  ]  ← 'b' can see all previous
+        #
+        # -----------------------------------------------------------------------
+        # REFERENCE: "Attention Is All You Need" (Vaswani et al., 2017)
+        # Section 3.1 - "Masked Multi-Head Attention"
+        # Paper: https://arxiv.org/abs/1706.03762
+        #
+        # Quote: "We need to prevent leftward information flow in the decoder
+        #         to preserve the auto-regressive property."
+        #
+        # Note: The original paper uses an encoder-decoder architecture.
+        #       GPT simplifies this by using ONLY the decoder with causal masking.
+        # -----------------------------------------------------------------------
+        #
+        # torch.triu creates an upper triangular matrix of True values.
+        # True = masked (blocked), False = allowed to attend
         causal_mask = torch.triu(
             torch.ones(block_size, block_size, dtype=torch.bool),
             diagonal=1
         )
+        # register_buffer: saves tensor with model & moves it to GPU with model,
+        # but it's NOT a learnable parameter (optimizer won't update it)
         self.register_buffer("causal_mask", causal_mask)
 
         # 10. Initialize weights
@@ -167,7 +206,18 @@ class GPT(nn.Module):
         print(f"GPT model created with {total_params:,} parameters")
 
     def _init_weights(self, module):
-        """Initialize weights with small random values."""
+        """
+        Initialize weights with small random values (std=0.02).
+
+        Why not use PyTorch defaults?
+        - PyTorch uses larger initial values (std=1.0 for Embedding, Kaiming for Linear)
+        - Small weights (std=0.02) help training stability in deep transformer networks
+
+        Reference: "Improving Language Understanding by Generative Pre-Training"
+        (Radford et al., 2018) - The original GPT paper
+        Paper: https://cdn.openai.com/research-covers/language-unsupervised/language_understanding_paper.pdf
+        Quote: "Model weights were initialized to N(0, 0.02)"
+        """
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
@@ -201,9 +251,19 @@ class GPT(nn.Module):
         pos_emb = self.position_embedding(positions)
 
         # 15. Combine Token and Position Embeddings
+        # token_emb = "what" each character is (semantic meaning)
+        # pos_emb   = "where" each character is (position 0, 1, 2, ...)
+        # Adding them gives the model both pieces of information.
+        #
+        # Dropout randomly zeros ~10% of values during training for regularization.
+        # This prevents overfitting by forcing the model to not rely on any single value.
+        # Reference: "Attention Is All You Need", Section 5.4
+        # "We apply dropout to the sums of the embeddings and the positional encodings"
         x = self.dropout(token_emb + pos_emb)
 
         # 16. Get the causal mask for current sequence length
+        # The full mask is (block_size x block_size), but our sequence might be shorter.
+        # We slice to get only the (seq_len x seq_len) portion we need.
         mask = self.causal_mask[:seq_len, :seq_len]
 
         # 17. Pass through Transformer Blocks
@@ -217,6 +277,13 @@ class GPT(nn.Module):
         logits = self.output_proj(x)
 
         # 20. Calculate loss if targets provided
+        # - During TRAINING: targets provided → calculate loss to learn from mistakes
+        # - During GENERATION: no targets → just return predictions (loss=None)
+        #
+        # Cross-entropy loss measures how wrong our predictions are.
+        # .view(-1, ...) flattens batch & sequence into one dimension:
+        #   logits:  (batch, seq, vocab) → (batch*seq, vocab)
+        #   targets: (batch, seq)        → (batch*seq,)
         loss = None
         if targets is not None:
             loss = F.cross_entropy(
@@ -226,43 +293,46 @@ class GPT(nn.Module):
 
         return logits, loss
 
-    # 21. Create the generate method for text generation
+    # 21. Generate method for text generation
     @torch.no_grad()
-    def generate(self,
-                 input_ids: torch.Tensor,
-                 max_new_tokens: int,
-                 temperature: float = 1.0,
-                 top_k: int = None) -> torch.Tensor:
+    def generate(self, input_ids: torch.Tensor, max_new_tokens: int, temperature: float = 1.0):
         """
-        Generate new tokens autoregressively.
+        Generate new tokens one at a time (autoregressive generation).
+
+        How it works:
+            "ROMEO:" → predict 'O' → "ROMEO:O" → predict ' ' → "ROMEO:O " → ...
 
         Args:
             input_ids: Starting tokens, shape (batch_size, sequence_length)
-            max_new_tokens: Number of new tokens to generate
-            temperature: Higher = more random, Lower = more deterministic
-            top_k: Only sample from the top k most likely tokens
-
-        Returns:
-            Generated tokens, shape (batch_size, sequence_length + max_new_tokens)
+            max_new_tokens: How many new characters to generate
+            temperature: Controls randomness (0.5=predictable, 1.0=normal, 1.5=creative)
         """
         for _ in range(max_new_tokens):
-            # 22. Crop to last block_size tokens if sequence is too long
-            idx_cond = input_ids if input_ids.size(1) <= self.block_size else input_ids[:, -self.block_size:]
 
-            # 23. Get predictions
-            logits, _ = self.forward(idx_cond)
-            logits = logits[:, -1, :] / temperature  # Get last position and scale
+            # 22. If sequence is longer than block_size, crop to last block_size tokens
+            if input_ids.size(1) <= self.block_size:
+                current_input = input_ids
+            else:
+                current_input = input_ids[:, -self.block_size:]
 
-            # 24. Apply top-k filtering if specified
-            if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = float('-inf')
+            # 23. Get model predictions
+            logits, _ = self.forward(current_input)
 
-            # 25. Sample from the distribution
-            probs = F.softmax(logits, dim=-1)
+            # 24. Take only the last position's predictions (what comes next?)
+            last_logits = logits[:, -1, :]
+
+            # 25. Apply temperature (divide to control randomness)
+            # Higher temp → more uniform probs → more random
+            # Lower temp → sharper probs → more predictable
+            last_logits = last_logits / temperature
+
+            # 26. Convert logits to probabilities
+            probs = F.softmax(last_logits, dim=-1)
+
+            # 27. Sample one token from the probability distribution
             next_token = torch.multinomial(probs, num_samples=1)
 
-            # 26. Append to sequence
+            # 28. Append to sequence and continue
             input_ids = torch.cat([input_ids, next_token], dim=1)
 
         return input_ids

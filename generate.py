@@ -95,21 +95,10 @@ def generate(model, tokenizer, device, prompt: str, max_tokens: int = 500, tempe
     This continues until we reach max_tokens.
 
     TEMPERATURE controls randomness:
-    - Low (0.2):  Very predictable, repetitive, "safe" choices
+    - Low (0.5):  Very predictable, "safe" choices
     - Medium (0.8): Balanced creativity and coherence (default)
     - High (1.5):  Very creative but may be nonsensical
     -------------------------------------------------------------------------
-
-    Args:
-        model: The trained GPT model
-        tokenizer: The character tokenizer
-        device: Device to run on
-        prompt: Starting text (e.g., "ROMEO:")
-        max_tokens: How many characters to generate
-        temperature: Controls randomness (0.2 = predictable, 1.5 = creative)
-
-    Returns:
-        The generated text as a string
     """
     # 1. Convert prompt text to token IDs
     prompt_ids = tokenizer.encode(prompt)
@@ -120,8 +109,7 @@ def generate(model, tokenizer, device, prompt: str, max_tokens: int = 500, tempe
     output_ids = model.generate(
         input_ids=input_ids,
         max_new_tokens=max_tokens,
-        temperature=temperature,
-        top_k=40  # Only consider top 40 most likely characters
+        temperature=temperature
     )
 
     # 3. Convert token IDs back to text

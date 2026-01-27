@@ -126,8 +126,7 @@ def generate_sample(model, tokenizer, device, prompt="ROMEO:", max_tokens=200):
     output_ids = model.generate(
         input_ids=input_ids,
         max_new_tokens=max_tokens,
-        temperature=0.8,
-        top_k=40
+        temperature=0.8
     )
 
     model.train()
