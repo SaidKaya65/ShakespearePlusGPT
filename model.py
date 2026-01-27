@@ -32,6 +32,15 @@ class TransformerBlock(nn.Module):
     """
 
     # 1. Initialize the class with hyperparameters
+    # -------------------------------------------------------------------------
+    # Default values (384, 6) are chosen for this educational project:
+    # - Small enough to train quickly (~10M total params)
+    # - Large enough to learn meaningful patterns
+    #
+    # For reference, GPT-2 Small uses embedding_dim=768, num_heads=12
+    # The key relationship: head_size = embedding_dim / num_heads = 64
+    # This head_size=64 is consistent across most GPT models.
+    # -------------------------------------------------------------------------
     def __init__(self,
                  embedding_dim: int = 384,
                  num_heads: int = 6,
@@ -54,12 +63,21 @@ class TransformerBlock(nn.Module):
         self.ln2 = nn.LayerNorm(embedding_dim)
 
         # 5. Create the Feed-Forward Network (MLP)
-        # Expands to 4x, applies GELU, then projects back
+        # The MLP expands to 4x the size, then projects back:
+        #   384 → 1536 → 384
+        #
+        # Why 4x? From "Attention Is All You Need" paper, Section 3.3:
+        # "The dimensionality of input and output is d_model=512,
+        #  and the inner-layer has dimensionality d_ff=2048"
+        # 2048 / 512 = 4x. This ratio is used in most transformers since.
+        #
+        # The expansion gives the network more capacity to learn complex
+        # patterns, then compresses back to the original size.
         self.mlp = nn.Sequential(
-            nn.Linear(embedding_dim, 4 * embedding_dim),
-            nn.GELU(),
-            nn.Linear(4 * embedding_dim, embedding_dim),
-            nn.Dropout(dropout)
+            nn.Linear(embedding_dim, 4 * embedding_dim),  # Expand: 384 → 1536
+            nn.GELU(),                                     # Activation function
+            nn.Linear(4 * embedding_dim, embedding_dim),  # Project back: 1536 → 384
+            nn.Dropout(dropout)                            # Regularization
         )
 
     # 6. Create the forward method
