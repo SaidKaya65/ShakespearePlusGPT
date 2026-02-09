@@ -169,6 +169,9 @@ class GPT(nn.Module):
         # Maps from embedding_dim to vocab_size (one score per character)
         self.output_proj = nn.Linear(embedding_dim, vocab_size)
 
+        # 8.5 Create Loss Function
+        self.loss_fn = nn.CrossEntropyLoss()
+
         # 9. Create Causal Mask (to prevent attending to future tokens)
         #
         # -----------------------------------------------------------------------
@@ -297,17 +300,25 @@ class GPT(nn.Module):
         # 20. Calculate loss if targets provided
         # - During TRAINING: targets provided → calculate loss to learn from mistakes
         # - During GENERATION: no targets → just return predictions (loss=None)
-        #
-        # Cross-entropy loss measures how wrong our predictions are.
-        # .view(-1, ...) flattens batch & sequence into one dimension:
-        #   logits:  (batch, seq, vocab) → (batch*seq, vocab)
-        #   targets: (batch, seq)        → (batch*seq,)
         loss = None
         if targets is not None:
-            loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                targets.view(-1)
-            )
+            # CrossEntropyLoss expects:
+            #   predictions: (N, num_classes)  → 2D
+            #   targets:     (N,)              → 1D
+            #
+            # But our shapes are:
+            #   logits:  (batch_size, seq_len, vocab_size) → 3D
+            #   targets: (batch_size, seq_len)             → 2D
+            #
+            # So we flatten batch & sequence into a single dimension:
+            #   logits:  (batch_size * seq_len, vocab_size)
+            #   targets: (batch_size * seq_len,)
+            batch_size, seq_len, vocab_size = logits.shape
+
+            logits_flat = logits.reshape(batch_size * seq_len, vocab_size)
+            targets_flat = targets.reshape(batch_size * seq_len)
+
+            loss = self.loss_fn(logits_flat, targets_flat)
 
         return logits, loss
 
